@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf--8">
+  <title>SFU Client with Room Selection</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; max-width: 800px; margin: 1em auto; }
+    input { padding: 4px 6px; }
+    button { padding: 4px 10px; }
+    pre { white-space: pre-wrap; word-wrap: break-word; border: 1px solid #ccc; background-color: #f9f9f9; padding: 8px; min-height: 240px; max-height: 50vh; overflow-y: auto; }
+    fieldset { margin-bottom: 1em; border: 1px solid #ccc; padding: 1em; }
+    legend { font-weight: bold; }
+    label { margin-left: 1em; margin-right: 0.5em; }
+    label:first-child { margin-left: 0; }
+  </style>
+</head>
+<body>
+
+<h1>SFU Client with Room Selection</h1>
+
+<fieldset>
+  <legend>Connection</legend>
+  <label for="wsurl">Server URL:</label>
+  <input id="wsurl" size="30" value="ws://127.0.0.1:8000">
+  <label for="roomid">Room ID:</label>
+  <input id="roomid" size="10" value="123">
+  <button id="connect">Connect</button>
+  <button id="disconnect" disabled>Disconnect</button>
+</fieldset>
+
+<fieldset>
+  <legend>Chat</legend>
+  <input id="msg" size="60" placeholder="Type message and press Enter or click Send" disabled>
+  <button id="send" disabled>Send</button>
+</fieldset>
+
+<pre id="log" aria-live="polite"></pre>
+
+<script>
+/* ---------- logging ---------- */
+function log(...args) {
+  const msg = args.map(a =>
+    a instanceof Error ? `[Error] ${a.stack || a.message}`
+      : typeof a === "object" ? JSON.stringify(a)
+      : String(a)
+  ).join(" ");
+  const el = document.getElementById("log");
+  el.textContent += msg + "\n";
+  el.scrollTop = el.scrollHeight;
+  console.log(...args);
+}
+
+/* ---------- globals ---------- */
+let pc, ws, channel;
+const pendingRemoteCandidates = [];
+
+/* ---------- helpers ---------- */
+function safeSend(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(obj));
+    return true;
+  }
+  log("[WS Error] Could not send; WebSocket not open.");
+  return false;
+}
+
+/* ---------- WebRTC setup ---------- */
+function setupPeerConnection() {
+  pc = new RTCPeerConnection();
+  log("[WebRTC] PeerConnection created");
+
+  // Create DataChannel *before* creating offer so SDP is negotiated for it
+  channel = pc.createDataChannel("chat");
+  log("[WebRTC] DataChannel created (label=chat).");
+  channel.onopen = () => {
+    log("✅ [WebRTC] DataChannel is open! You can now send messages.");
+    enableSend(true);
+  };
+  channel.onclose = () => {
+    log("🛑 [WebRTC] DataChannel closed");
+    enableSend(false);
+  };
+  channel.onerror = (e) => log("[WebRTC] DataChannel error:", e);
+  channel.onmessage = e => log("⬅️ [Msg Rcvd]", e.data);
+
+  pc.onnegotiationneeded = async () => {
+    log("[SDP] onnegotiationneeded event fired.");
+    try {
+      // ** MODIFIED SECTION **
+      // Get the Room ID from the input field
+      const roomId = document.getElementById("roomid").value.trim();
+      if (!roomId) {
+        log("[Error] Room ID is required. Please enter a Room ID and reconnect.");
+        teardown(); // Abort the connection if no room a is provided
+        return;
+      }
+      // ** END MODIFIED SECTION **
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      log("[SDP] Created and set local offer.");
+
+      // ** MODIFIED SECTION **
+      // Send the offer along with the chosen room_id
+      const payload = {
+        type: "offer",
+        room_id: roomId, // Send the room ID to the server
+        sdp: pc.localDescription.sdp
+      };
+      if(safeSend(payload)) {
+        log(`[Signaling] Sent offer for room_id: ${roomId}`);
+      }
+      // ** END MODIFIED SECTION **
+
+    } catch (err) {
+      log("[SDP] Error creating offer:", err);
+    }
+  };
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      // Client-side candidate filtering can be tricky.
+      // Your server-side filtering is more reliable.
+      // We will send all candidates and let the server handle them.
+      log("[ICE] Local candidate gathered:", e.candidate.candidate);
+      safeSend({
+        type: "candidate",
+        candidate: e.candidate.candidate,
+        sdpMid: e.candidate.sdpMid,
+      });
+    } else {
+      log("[ICE] All local candidates gathered (end-of-candidates).");
+      safeSend({ type: "endOfCandidates" });
+    }
+  };
+
+  pc.oniceconnectionstatechange = () => log("[ICE] Connection state:", pc.iceConnectionState);
+  pc.onconnectionstatechange = () => log("[PC] Connection state:", pc.connectionState);
+}
+
+/* ---------- signaling ---------- */
+function connect() {
+  const url = document.getElementById("wsurl").value.trim();
+  if (!url) return;
+
+  log(`[Signaling] Connecting to ${url}...`);
+  ws = new WebSocket(url);
+
+  ws.onopen = async () => {
+    log("✅ [Signaling] WebSocket connected.");
+    document.getElementById("connect").disabled = true;
+    document.getElementById("disconnect").disabled = false;
+    document.getElementById("wsurl").disabled = true;
+    document.getElementById("roomid").disabled = true;
+
+    // Reset state and create the peer connection.
+    // onnegotiationneeded will fire and start the process.
+    pendingRemoteCandidates.length = 0;
+    setupPeerConnection();
+  };
+
+  ws.onmessage = async (msg) => {
+    let data;
+    try {
+      data = JSON.parse(msg.data);
+    } catch (e) {
+      log("[Signaling] Received invalid JSON:", msg.data);
+      return;
+    }
+
+    log(`[Signaling] Received message: ${data.type}`);
+
+    try {
+       if (data.type === "answer") {
+        await pc.setRemoteDescription({ type: "answer", sdp: data.sdp });
+        log("[SDP] Set remote description (answer).");
+
+        // Drain any candidates that arrived before the answer
+        log(`[ICE] Draining ${pendingRemoteCandidates.length} queued remote candidates...`);
+        for (const c of pendingRemoteCandidates.splice(0)) {
+          await pc.addIceCandidate(c);
+          log("[ICE] Added queued remote candidate.");
+        }
+
+      } else if (data.type === "candidate") {
+        const candidate = new RTCIceCandidate({
+          candidate: data.candidate,
+          sdpMid: data.sdpMid,
+        });
+        if (!pc.remoteDescription) {
+          pendingRemoteCandidates.push(candidate);
+          log("[ICE] Queued remote candidate (waiting for answer).");
+        } else {
+          await pc.addIceCandidate(candidate);
+          log("[ICE] Added remote candidate.");
+        }
+      } else if (data.type === "pong") {
+        // Just log, nothing to do
+      } else {
+        log("[Signaling] Unhandled message type:", data.type);
+      }
+    } catch (err) {
+      log(`[Error] Failed to handle message type ${data.type}:`, err);
+    }
+  };
+
+  ws.onerror = (e) => log("[Signaling] WebSocket error.", e);
+  ws.onclose = (e) => {
+    log(`[Signaling] WebSocket closed. Code: ${e.code}, Reason: ${e.reason}`);
+    teardown();
+  };
+}
+
+/* ---------- teardown ---------- */
+function teardown() {
+  try { channel?.close(); } catch {}
+  try { pc?.close(); } catch {}
+  // Don't close WS here, let the onclose event handle UI teardown naturally
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.close();
+  }
+
+  channel = null;
+  pc = null;
+  ws = null;
+
+  enableSend(false);
+  document.getElementById("connect").disabled = false;
+  document.getElementById("disconnect").disabled = true;
+  document.getElementById("wsurl").disabled = false;
+  document.getElementById("roomid").disabled = false;
+  pendingRemoteCandidates.length = 0;
+  log("--- Disconnected ---");
+}
+
+/* ---------- UI ---------- */
+function enableSend(enable) {
+  document.getElementById("msg").disabled = !enable;
+  document.getElementById("send").disabled = !enable;
+}
+
+document.getElementById("connect").onclick = connect;
+document.getElementById("disconnect").onclick = teardown;
+
+document.getElementById("send").onclick = () => {
+  const el = document.getElementById("msg");
+  if (!channel || channel.readyState !== "open") return;
+  const text = el.value;
+  if (!text) return;
+  channel.send(text);
+  log("➡️ [Msg Sent]", text);
+  el.value = "";
+  el.focus();
+};
+
+document.getElementById("msg").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    document.getElementById("send").click();
+  }
+});
+</script>
+</body>
+</html>
