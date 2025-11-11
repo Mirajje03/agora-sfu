@@ -4,23 +4,14 @@ project(sfu_server LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Find libdatachannel (ensure you installed it or set CMAKE_PREFIX_PATH accordingly)
-find_package(libdatachannel REQUIRED)
+add_subdirectory(libdatachannel)
 
-# Fetch nlohmann_json (single-header) for simple signaling messages
-include(FetchContent)
-FetchContent_Declare(
-  nlohmann_json
-  URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
-)
-FetchContent_MakeAvailable(nlohmann_json)
-
-add_executable(sfu_server main.cpp)
+add_executable(sfu_server src/main.cpp src/room.cpp src/router.cpp src/loop.cpp)
 
 target_include_directories(sfu_server PRIVATE libdatachannel/include)
 
 target_link_libraries(sfu_server
   PRIVATE
-    libdatachannel
+    datachannel
     nlohmann_json::nlohmann_json
 )
