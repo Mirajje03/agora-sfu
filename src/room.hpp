@@ -1,6 +1,7 @@
 #pragma once
 
 #include "fwd.hpp"
+#include "participant.hpp"
 
 #include <rtc/description.hpp>
 
@@ -15,17 +16,19 @@ using ClientId = uint64_t;
 
 class Room {
 public:
-    Room(const std::shared_ptr<Loop>& loop);
-    void AddClient(uint64_t clientId, std::shared_ptr<rtc::DataChannel> dataChannel);
-    void RemoveClient(uint64_t clientId);
+    Room() = default;
+
+    void AddParticipant(ClientId clientId, const std::shared_ptr<Participant>& participant);
+    void RemoveParticipant(ClientId clientId);
+
+    bool HasParticipant(ClientId clientId) {
+        return Participants_.count(clientId);
+    }
+
+    void HandleTrackForParticipant(ClientId clientId, const std::shared_ptr<rtc::Track>& track);
 
 private:
-    void Broadcast(uint64_t fromId, rtc::message_variant&& message);
-
-private:
-    std::shared_ptr<Loop> Loop_;
-
-    std::unordered_map<uint64_t, std::shared_ptr<rtc::DataChannel>> Clients_;
+    std::unordered_map<ClientId, std::shared_ptr<Participant>> Participants_;
 };
 
 } // namespace sfu

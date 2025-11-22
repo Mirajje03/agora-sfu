@@ -1,6 +1,7 @@
 #include "router.hpp"
 
 #include "loop.hpp"
+#include "participant.hpp"
 
 #include <rtc/description.hpp>
 #include <rtc/rtc.hpp>
@@ -28,7 +29,7 @@ Router::Router()
     : Loop_(std::make_shared<Loop>())
 { }
 
-void Router::WsOpenCallback(std::shared_ptr<rtc::WebSocket>&& ws) {
+void Router::WsOpenCallback(std::shared_ptr<rtc::WebSocket> ws) {
     Loop_->EnqueueTask([this, ws = std::move(ws)]
     {
         auto id = IdGenerator_++;
@@ -40,7 +41,7 @@ void Router::WsOpenCallback(std::shared_ptr<rtc::WebSocket>&& ws) {
     });
 }
 
-void Router::WsClosedCallback(std::shared_ptr<rtc::WebSocket>&& ws) {
+void Router::WsClosedCallback(std::shared_ptr<rtc::WebSocket> ws) {
     Loop_->EnqueueTask([this, ws = std::move(ws)]
     {
         std::shared_ptr<Client> clientToClose;
@@ -58,7 +59,7 @@ void Router::WsClosedCallback(std::shared_ptr<rtc::WebSocket>&& ws) {
 
         if (clientToClose) {
             std::cout << "[Client " << idToClose << "] WebSocket disconnected" << std::endl;
-            Rooms_.at(clientToClose->roomId).RemoveClient(idToClose);
+            Rooms_.at(clientToClose->roomId).RemoveParticipant(idToClose);
 
             if (clientToClose->pc) {
                 clientToClose->pc->close();
@@ -67,7 +68,7 @@ void Router::WsClosedCallback(std::shared_ptr<rtc::WebSocket>&& ws) {
     });
 }
 
-void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket>&& ws, rtc::message_variant&& message) {
+void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::message_variant&& message) {
     Loop_->EnqueueTask([this, ws = std::move(ws), message = std::move(message)]
     {
         auto pstr = std::get_if<std::string>(&message);
@@ -107,20 +108,39 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket>&& ws, rtc::mess
         std::cout << "[Client " << clientId << "] Received signaling: " << type << std::endl;
 
         if (type == "offer") {
+            auto sdpIt = j.find("sdp");
+            if (sdpIt == j.end() || !sdpIt->is_string()) {
+                std::cerr << "[Client " << clientId << "] Offer missing sdp" << std::endl;
+                return;
+            }
+
+            auto roomIdIt = j.find("room_id");
+            if (roomIdIt == j.end() || !roomIdIt->is_string()) {
+                std::cerr << "[Client " << clientId << "] Offer missing room id" << std::endl;
+                return;
+            }
+            
+            // Update client state
+            client->roomId = std::stoll(std::string{*roomIdIt});
+            std::string sdp = *sdpIt;
+
+            if (!Rooms_.count(client->roomId)) {
+                Rooms_.emplace(client->roomId, Room{});
+            }
+
             if (!client->pc) {
                 rtc::Configuration config;
                 config.disableAutoNegotiation = true;
+                config.forceMediaTransport = true;
                 
                 std::cout << "[Client " << clientId << "] Creating PeerConnection" << std::endl;
                 client->pc = std::make_shared<rtc::PeerConnection>(config);
 
+                std::cout << "Added new participant " << clientId << " to a room " << client->roomId << "\n";
+
                 client->pc->onLocalDescription([ws, clientId](const rtc::Description& desc) {
                     std::cout << "[Client " << clientId << "] Local description type: " << desc.typeString() << std::endl;
                     
-                    if (desc.type() != rtc::Description::Type::Answer) {
-                        return;
-                    }
-
                     json answer = {
                         {"type", desc.typeString()},
                         {"sdp", std::string(desc)}
@@ -150,46 +170,35 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket>&& ws, rtc::mess
                         jcand["sdpMid"] = mid;
                     }
 
-                    int a;
                     ws->send(jcand.dump());
                 });
 
-                client->pc->onDataChannel([&, client, clientId](std::shared_ptr<rtc::DataChannel> dc) {
-                    std::cout << "[Client " << clientId << "] DataChannel created: label=" << dc->label() << std::endl;
-                    if (!Rooms_.count(client->roomId)) {
-                        Rooms_.emplace(client->roomId, Loop_);
-                    }
-                    Rooms_.at(client->roomId).AddClient(clientId, dc);
+                client->pc->onTrack([&, client, clientId](std::shared_ptr<rtc::Track> track) {
+                    auto session = std::make_shared<rtc::RtcpReceivingSession>();
+                    track->setMediaHandler(session);
+
+                    Loop_->EnqueueTask([this, client, clientId, track] {
+                        std::cout << "Handle track for client: " << clientId << "\n";
+                        Rooms_.at(client->roomId).HandleTrackForParticipant(clientId, track);
+                    });
                 });
 
-                client->pc->onStateChange([clientId](rtc::PeerConnection::State state) {
-                    std::cout << "[Client " << clientId << "] PC State: ";
-                    switch(state) {
-                        case rtc::PeerConnection::State::New: std::cout << "New"; break;
-                        case rtc::PeerConnection::State::Connecting: std::cout << "Connecting"; break;
-                        case rtc::PeerConnection::State::Connected: std::cout << "Connected"; break;
-                        case rtc::PeerConnection::State::Disconnected: std::cout << "Disconnected"; break;
-                        case rtc::PeerConnection::State::Failed: std::cout << "Failed"; break;
-                        case rtc::PeerConnection::State::Closed: std::cout << "Closed"; break;
-                    }
-                    std::cout << std::endl;
+                client->pc->onStateChange([this, client, clientId](rtc::PeerConnection::State state) {
+                    Loop_->EnqueueTask([this, client, clientId, state] {
+                        if (state == rtc::PeerConnection::State::Connected) {
+                            if (Rooms_.at(client->roomId).HasParticipant(clientId)) {
+                                return;
+                            }
+
+                            std::cout << "[Client " << clientId << "Connected" << "\n";
+
+                            auto newParticipant = std::make_shared<Participant>(client->pc);
+                            Rooms_.at(client->roomId).AddParticipant(clientId, newParticipant);
+                        }
+                    });
                 });
             }
 
-            auto sdpIt = j.find("sdp");
-            if (sdpIt == j.end() || !sdpIt->is_string()) {
-                std::cerr << "[Client " << clientId << "] Offer missing sdp" << std::endl;
-                return;
-            }
-
-            auto roomIdIt = j.find("room_id");
-            if (roomIdIt == j.end() || !roomIdIt->is_string()) {
-                std::cerr << "[Client " << clientId << "] Offer missing room id" << std::endl;
-                return;
-            }
-            client->roomId = std::stoll(std::string{*roomIdIt});
-
-            std::string sdp = *sdpIt;
             std::cout << "[Client " << clientId << "] Processing offer..." << std::endl;
             
             client->pc->setRemoteDescription(rtc::Description(sdp, "offer"));
@@ -249,15 +258,15 @@ void Router::Run() {
     auto wsServer = std::make_shared<rtc::WebSocketServer>(wsCfg);
     wsServer->onClient([&](std::shared_ptr<rtc::WebSocket> ws) {
         ws->onOpen([&, ws]() mutable {
-            WsOpenCallback(std::move(ws));
+            WsOpenCallback(ws);
         });
 
         ws->onClosed([&, ws]() mutable {
-            WsClosedCallback(std::move(ws));
+            WsClosedCallback(ws);
         });
 
         ws->onMessage([&, ws](rtc::message_variant message) mutable {
-            WsOnMessageCallback(std::move(ws), std::move(message));
+            WsOnMessageCallback(ws, std::move(message));
         });
     });
     t.join();

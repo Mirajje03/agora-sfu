@@ -19,9 +19,9 @@ public:
     void Run();
 
 private:
-    void WsOpenCallback(std::shared_ptr<rtc::WebSocket>&& ws);
-    void WsClosedCallback(std::shared_ptr<rtc::WebSocket>&& ws);
-    void WsOnMessageCallback(std::shared_ptr<rtc::WebSocket>&& ws, rtc::message_variant&& message);
+    void WsOpenCallback(std::shared_ptr<rtc::WebSocket> ws);
+    void WsClosedCallback(std::shared_ptr<rtc::WebSocket> ws);
+    void WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::message_variant&& message);
 
 private:
     std::atomic_uint64_t IdGenerator_{1};

@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_subdirectory(libdatachannel)
 
-add_executable(sfu_server src/main.cpp src/room.cpp src/router.cpp src/loop.cpp)
+add_executable(sfu_server src/main.cpp src/room.cpp src/router.cpp src/loop.cpp src/participant.cpp)
 
 target_include_directories(sfu_server PRIVATE libdatachannel/include)
 
