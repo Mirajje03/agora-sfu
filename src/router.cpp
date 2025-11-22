@@ -23,6 +23,8 @@ struct Client {
     RoomId roomId;
     std::shared_ptr<rtc::WebSocket> ws;
     std::shared_ptr<rtc::PeerConnection> pc;
+
+    std::shared_ptr<rtc::Track> track;
 };
 
 Router::Router()
@@ -132,6 +134,8 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
                 rtc::Configuration config;
                 config.disableAutoNegotiation = true;
                 config.forceMediaTransport = true;
+
+                config.iceServers.emplace_back("stun:stun.l.google.com:19302");
                 
                 std::cout << "[Client " << clientId << "] Creating PeerConnection" << std::endl;
                 client->pc = std::make_shared<rtc::PeerConnection>(config);
@@ -176,11 +180,7 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
                 client->pc->onTrack([&, client, clientId](std::shared_ptr<rtc::Track> track) {
                     auto session = std::make_shared<rtc::RtcpReceivingSession>();
                     track->setMediaHandler(session);
-
-                    Loop_->EnqueueTask([this, client, clientId, track] {
-                        std::cout << "Handle track for client: " << clientId << "\n";
-                        Rooms_.at(client->roomId).HandleTrackForParticipant(clientId, track);
-                    });
+                    client->track = track;
                 });
 
                 client->pc->onStateChange([this, client, clientId](rtc::PeerConnection::State state) {
@@ -194,6 +194,8 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
 
                             auto newParticipant = std::make_shared<Participant>(client->pc);
                             Rooms_.at(client->roomId).AddParticipant(clientId, newParticipant);
+                            std::cout << "Handle track for client: " << clientId << "\n";
+                            Rooms_.at(client->roomId).HandleTrackForParticipant(clientId, client->track);
                         }
                     });
                 });

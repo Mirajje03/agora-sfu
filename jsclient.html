@@ -2,200 +2,156 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>SFU Client with Signaling Logs</title>
+  <title>Unified Join Client</title>
   <style>
-    body { font-family: "Consolas", monospace; max-width: 900px; margin: 2em auto; background: #e0e0e0; }
-    .container { background: white; padding: 20px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); border-radius: 8px; }
-    
-    input { padding: 8px; border: 1px solid #ccc; }
-    button { padding: 8px 20px; background: #0056b3; color: white; border: none; cursor: pointer; }
-    button:disabled { background: #999; }
-
-    /* Log Styling */
-    #logs { 
-        background: #1e1e1e; color: #00ff00; 
-        padding: 15px; height: 400px; overflow-y: auto; 
-        margin-top:15px; border-radius: 5px; 
-        font-size: 13px; line-height: 1.4;
-        white-space: pre-wrap;
-    }
-    
-    /* Remote Audio Badges */
-    .badge { 
-        background: #28a745; color: white; 
-        padding: 8px 12px; border-radius: 20px; 
-        margin: 5px; display:inline-flex; align-items: center; gap: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-        animation: pop 0.3s ease-out;
-    }
-    @keyframes pop { from { transform: scale(0); } to { transform: scale(1); } }
-</style>
+    body { font-family: monospace; max-width: 800px; margin: 2em auto; background: #f4f4f9; }
+    .container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+    button { padding: 10px 20px; background: #28a745; color: white; border: none; cursor: pointer; font-size: 16px; }
+    button:disabled { background: #ccc; }
+    #logs { background: #222; color: #0f0; padding: 10px; height: 300px; overflow-y: auto; border-radius: 4px; margin-top:10px;}
+    .badge { background: #007bff; color: white; padding: 5px 10px; border-radius: 15px; margin: 5px; display: inline-block; }
+  </style>
 </head>
 <body>
 
 <div class="container">
-  <h2 style="margin-top:0">📡 Detailed Signaling Client</h2>
-  
-  <div style="margin-bottom: 10px;">
-    <input id="wsurl" value="ws://127.0.0.1:8000" placeholder="WS URL"> 
-    <input id="roomid" value="1001" size="5" placeholder="Room">
-    <button id="connect">Connect</button>
-  </div>
+  <h1>🚀 Unified Join Client</h1>
+  <p>Microphone is sent in the Initial Offer (No Phase 2 Upload).</p>
 
+  <div style="margin-bottom: 20px;">
+    <input id="wsurl" value="ws://127.0.0.1:8000" placeholder="WS URL">
+    <input id="roomid" value="1001" size="5" placeholder="Room">
+    <button id="connect">Get Mic & Join</button>
+  </div>
+  
   <div id="remotes"></div>
-  <div id="logs">Waiting for connection...</div>
+  <pre id="logs"></pre>
 </div>
 
 <script>
-let pc, ws, localStream;
-let isProcessingServerOffer = false; 
-const logsEl = document.getElementById("logs");
+let pc, ws;
 
 function log(msg) {
-    const time = new Date().toLocaleTimeString().split(' ')[0]; // HH:MM:SS
-    logsEl.textContent += `[${time}] ${msg}\n`;
-    logsEl.scrollTop = logsEl.scrollHeight;
-    console.log(`[${time}] ${msg}`);
+    const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    console.log(line);
+    document.getElementById("logs").textContent += line + "\n";
+    document.getElementById("logs").scrollTop = 99999;
 }
 
-document.getElementById("connect").onclick = () => {
-  ws = new WebSocket(document.getElementById("wsurl").value);
+document.getElementById("connect").onclick = async () => {
+  const url = document.getElementById("wsurl").value;
   document.getElementById("connect").disabled = true;
-  logsEl.textContent = ""; // Clear logs
 
-  ws.onopen = () => { 
-      log("🔵 WebSocket Connected"); 
-      setupPC(); 
+  try {
+      log("🎤 1. Requesting Microphone...");
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      log("✅ Microphone Acquired.");
+
+      // Start the connection process with the stream ready
+      startConnection(url, stream);
+
+  } catch (e) {
+      log("❌ Error: " + e.message);
+      document.getElementById("connect").disabled = false;
+  }
+};
+
+function startConnection(url, localStream) {
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    log("🔵 2. WebSocket Connected");
+    
+    // RTCPeerConnection configuration with STUN server
+    const config = {
+        iceServers: [
+            { urls: "stun:stun.l.google.com:19302" }
+        ]
+    };
+    pc = new RTCPeerConnection(config);
+
+    // --- STEP A: Add Mic Track BEFORE Offer ---
+    localStream.getTracks().forEach(track => {
+        log(`➕ Added Mic Track to PC (ID: ${track.id.substring(0,5)}...)`);
+        pc.addTrack(track, localStream);
+    });
+
+    // --- STEP B: Add Data Channel (Required) ---
+    pc.createDataChannel("control");
+
+    // --- STEP C: Handle Incoming Audio (From Server) ---
+    pc.ontrack = (e) => {
+        const id = e.track.id;
+        log(`🎧 NEW REMOTE AUDIO (User: ${id.substring(0,5)}...)`);
+        
+        const badge = document.createElement('div');
+        badge.className = 'badge';
+        badge.innerHTML = `User ${id.substring(0,5)}... 🔊`;
+        
+        const au = document.createElement('audio');
+        au.srcObject = e.streams[0];
+        au.autoplay = true;
+        badge.appendChild(au);
+        document.getElementById("remotes").appendChild(badge);
+    };
+
+    // --- STEP D: Trigger Single Initial Offer ---
+    pc.onnegotiationneeded = async () => {
+        // This will only run ONCE because we add tracks before this event fires/processes
+        log("⚙️ Generating Initial Offer (Contains MIC + DATA)...");
+        
+        const offer = await pc.createOffer();
+        
+        // Verify for debugging
+        if (offer.sdp.includes("m=audio")) {
+            log("ℹ️ Verified: Offer contains Audio Media Section.");
+        }
+
+        await pc.setLocalDescription(offer);
+
+        ws.send(JSON.stringify({
+            type: "offer",
+            room_id: document.getElementById("roomid").value,
+            sdp: pc.localDescription.sdp
+        }));
+        
+        log("📤 Sent Initial Offer to Server.");
+    };
+
+    // --- ICE Handling ---
+    pc.onicecandidate = ({candidate}) => {
+        if (candidate && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "candidate", candidate: candidate.candidate, sdpMid: candidate.sdpMid }));
+        }
+    };
+
+    pc.onconnectionstatechange = () => {
+        log(`PC State: ${pc.connectionState.toUpperCase()}`);
+    };
   };
-  
+
   ws.onmessage = async (msg) => {
     const data = JSON.parse(msg.data);
 
     if (data.type === "answer") {
-      // -------------------------------------------------
-      // RECV ANSWER (Ack for our Join or Mic Offer)
-      // -------------------------------------------------
-      log("📩 [RX ANSWER] Server accepted our Offer. Handshake Complete.");
+      log("📩 Received ANSWER. (Upload Established)");
       await pc.setRemoteDescription(data);
     } 
     else if (data.type === "offer") {
-      // -------------------------------------------------
-      // RECV OFFER (Server sending Room Audio)
-      // -------------------------------------------------
-      log("📩 [RX OFFER] Server sending tracks. Locking Mic logic...");
-      isProcessingServerOffer = true; // Lock to prevent collision
-
-      await pc.setRemoteDescription(data);
+      // This handles the Server sending DOWNLINK tracks (other people)
+      log("📩 Received SERVER OFFER (Incoming Room Audio).");
       
-      // Create Answer
+      await pc.setRemoteDescription(data);
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       
-      // Send Answer
       ws.send(JSON.stringify({ type: "answer", sdp: answer.sdp }));
-      log("📤 [TX ANSWER] Sent acknowledgement to Server.");
-      
-      // Unlock logic after a brief safety buffer
-      setTimeout(() => {
-          if(isProcessingServerOffer) {
-              isProcessingServerOffer = false;
-              log("🔓 Negotiation unlocked. Ready for Mic.");
-          }
-      }, 500);
+      log("📤 Sent Answer to Server.");
     } 
     else if (data.type === "candidate") {
       if (pc.remoteDescription) await pc.addIceCandidate(data);
     }
   };
-};
-
-function setupPC() {
-  pc = new RTCPeerConnection();
-  
-  // Phase 1: Data Channel to trigger initial Join
-  pc.createDataChannel("control"); 
-
-  // Handle Remote Audio
-  pc.ontrack = (e) => {
-      const id = e.track.id.substring(0,5);
-      log(`🔊 [TRACK] New Audio Track Received: ${id}...`);
-      
-      const au = document.createElement('audio');
-      au.srcObject = e.streams[0];
-      au.autoplay = true;
-      
-      const b = document.createElement('div');
-      b.className = 'badge'; 
-      b.innerHTML = `User ${id} <span>🔊</span>`;
-      b.appendChild(au);
-      document.getElementById("remotes").appendChild(b);
-  };
-
-  // Handle Outgoing Negotiation (Join or Mic)
-  pc.onnegotiationneeded = async () => {
-      // PREVENT GLARE: If server is talking, we shut up.
-      if (isProcessingServerOffer) {
-          log("⚠️ [SKIP] Negotiation needed, but Server is active. Deferring...");
-          return;
-      }
-
-      // -------------------------------------------------
-      // SEND OFFER (Join or Mic)
-      // -------------------------------------------------
-      log("📤 [TX OFFER] Sending local Description (Join/Mic) to Server...");
-      
-      try {
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          ws.send(JSON.stringify({ 
-              type: "offer", 
-              room_id: document.getElementById("roomid").value, 
-              sdp: pc.localDescription.sdp 
-          }));
-      } catch(err) {
-          log("❌ Offer generation failed: " + err);
-      }
-  };
-
-  pc.onconnectionstatechange = () => {
-      const state = pc.connectionState;
-      log(`🔄 [STATE] PeerConnection: ${state.toUpperCase()}`);
-      
-      if (state === 'connected') {
-          log("✅ Connected. Starting Mic sequence...");
-          tryAddMic(); 
-      }
-  };
-
-  pc.onicecandidate = ({candidate}) => {
-      if(candidate) ws.send(JSON.stringify({type:"candidate", candidate:candidate.candidate, sdpMid:candidate.sdpMid}));
-  }
-}
-
-// Robust System to add Mic
-async function tryAddMic() {
-    if (localStream) return; // Already done
-
-    // If Server is negotiating (Phase 2), we wait.
-    if (isProcessingServerOffer) {
-        log("⏳ Server busy. Retrying Mic in 500ms...");
-        setTimeout(tryAddMic, 500);
-        return;
-    }
-
-    log("🎤 Acquiring Microphone...");
-    try {
-        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        
-        log("➕ Adding Mic Track to Connection...");
-        localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-        
-        // Note: addTrack automatically triggers 'onnegotiationneeded',
-        // which will send the [TX OFFER].
-        
-    } catch(e) { 
-        log("❌ Mic Access Error: " + e.message); 
-    }
 }
 </script>
 </body>

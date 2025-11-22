@@ -39,18 +39,13 @@ public:
         return PeerConnection_;
     }
 
-    void Negotiate() {
-        if (PeerConnection_->state() == rtc::PeerConnection::State::Connected) {
-            PeerConnection_->setLocalDescription(); 
-        }
-    }
+    std::unordered_map<ClientId, std::shared_ptr<rtc::Track>> OutgoingTracks_;
 
 private:
     std::shared_ptr<rtc::Track> Track_;
     std::shared_ptr<rtc::PeerConnection> PeerConnection_;
 
     std::mutex TracksMutex_;
-    std::unordered_map<ClientId, std::shared_ptr<rtc::Track>> OutgoingTracks_;
 };
 
 } // namespace sfu

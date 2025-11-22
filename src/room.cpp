@@ -45,14 +45,19 @@ void Room::RemoveParticipant(ClientId clientId) {
         return;
     }
 
+    std::cout << "Removing participant " << clientId << " from the room" << std::endl;
+
     for (auto& [id, participant] : Participants_) {
         if (id == clientId) {
             continue;
         }
 
+        std::cout << "Removing track from " << id << " to " << clientId << std::endl;
+
         participant->RemoveRemoteTrack(clientId);
     }
 
+    Participants_.at(clientId)->GetAudioTrack()->close();
     Participants_.erase(clientId);
 }
 
